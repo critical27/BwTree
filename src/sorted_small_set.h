@@ -51,7 +51,7 @@ class SortedSmallSet {
     // we want to catch the duplication by lower bound
     // But if we are OK with duplications then use upper bound here
     //auto it = std::lower_bound(start_p, end_p, value, value_cmp_obj);
-    
+
     // Since the assumption is a small array
     // we choose to use linear search to increase performance
     for(auto it = start_p;it < end_p;it++) {
@@ -68,16 +68,16 @@ class SortedSmallSet {
 
           end_p++;
         }
-        
+
         return;
       }
     }
-    
+
     *end_p++ = value;
 
     return;
   }
-  
+
   /*
    * InsertNoDedup() - Insert a value without removing duplications
    *
@@ -146,7 +146,7 @@ class SortedSmallSet {
   inline std::ptrdiff_t GetSize() const {
     return end_p - start_p;
   }
-  
+
   /*
    * Invaidate() - Clears all contents between start_p and end_p
    *

@@ -26,7 +26,7 @@ template <typename T>
 class VersionedPointer {
  private:
   T *ptr;
-  
+
   // Before each CAS we need to increase this version counter
   uint64_t version;
  public:
@@ -208,11 +208,11 @@ class AtomicStack {
    */
   inline VersionedPointer<T> PreparePush() {
     VersionedPointer<T> snapshot_top_p = top_p.exchange(nullptr);
-    
+
     #ifdef BWTREE_DEBUG
     assert((snapshot_top_p - data + 1) < STACK_SIZE);
     #endif
-    
+
     // If this return value contains nullptr internally
     // then we know there is another Push() operation going on
     return snapshot_top_p;
@@ -313,7 +313,7 @@ class AtomicStack {
       #ifdef BWTREE_DEBUG
       assert((snapshot_top_p - data) < STACK_SIZE);
       #endif
-      
+
       // Load current top pointer and check whether it points to a valid slot
       // If not then just return false. But the item might be modified
       VersionedPointer<T> snapshot_top_p = top_p.load();
@@ -338,10 +338,10 @@ class AtomicStack {
 
         // Copy construct a new pointer
         VersionedPointer<T> new_snapshot_top_p = snapshot_top_p;
-        
+
         // Move the previous pointer back by 1 element
         new_snapshot_top_p--;
-        
+
         // Update version number to avoid ABA problem
         new_snapshot_top_p.ToNextVersion();
 
