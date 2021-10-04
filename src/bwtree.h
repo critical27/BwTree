@@ -191,6 +191,7 @@ extern bool print_flag;
  * class BwTreeBase - Base class of BwTree that stores some common members
  */
 class BwTreeBase {
+ public:
   // This is the presumed size of cache line
   static constexpr size_t CACHE_LINE_SIZE = 64;
 
@@ -235,6 +236,7 @@ class BwTreeBase {
   /*
    * class GCMetaData - Metadata for performing GC on per-thread basis
    */
+  // doodle: 看起来是基于epoch来gc
   class GCMetaData {
    public:
     // This is the last active epoch counter; all garbages before this counter
@@ -305,13 +307,13 @@ class BwTreeBase {
                 "class PaddedGCMetadata size does"
                 " not conform to the alignment!");
 
- private:
   // This is used as the garbage collection ID, and is maintained in a per
   // thread level
   // This is initialized to -1 in order to distinguish between registered
   // threads and unregistered threads
   static thread_local int gc_id;
 
+ private:
   // This is used to count the number of threads participating GC process
   // We use this number to initialize GC data structure
   static std::atomic<size_t> total_thread_num;
@@ -997,6 +999,7 @@ class BwTree : public BwTreeBase {
     const KeyType search_key;
 
     // We only need to keep current snapshot and parent snapshot
+    // doodle: NodeID + Node指针
     NodeSnapshot current_snapshot;
     NodeSnapshot parent_snapshot;
 
@@ -1166,6 +1169,7 @@ class BwTree : public BwTreeBase {
     /*
      * Constructor - Initialize type and metadata
      */
+    // doodle: p_high_key_p用来保存NextNodeID 当前节点的范围是[p_low_key_p->first, p_high_key_p->first)
     BaseNode(NodeType p_type,
              const KeyNodeIDPair *p_low_key_p,
              const KeyNodeIDPair *p_high_key_p,
@@ -1898,7 +1902,10 @@ class BwTree : public BwTreeBase {
     // One reasonable amount of memory for each chunk is
     // delta chain len * struct len + sizeof this struct
     static constexpr size_t CHUNK_SIZE = \
-      sizeof(DeltaNodeUnion) * 8 + sizeof(AllocationMeta);
+      // doodle: 编译报错 实际sizeof(AllocationMeta) = 24 (std::atomic为8 对齐成了24)
+      // 不太懂sizeof(DeltaNodeUnion) * 8是什么意思
+      // sizeof(DeltaNodeUnion) * 8 + sizeof(AllocationMeta);
+      sizeof(DeltaNodeUnion) * 8 + sizeof(64);
 
    private:
     // This points to the higher address end of the chunk we are
@@ -1908,6 +1915,8 @@ class BwTree : public BwTreeBase {
     char *const limit;
     // This forms a linked list which needs to be traversed in order to
     // free chunks of memory
+    // doodle: 是个链表 AllocationMeta可以指向另一块AllocationMeta 当自己空间不足时(tail < limit)
+    // 就再申请一块内存 然后next指向这块新内存
     std::atomic<AllocationMeta *> next;
 
    public:
@@ -1929,6 +1938,7 @@ class BwTree : public BwTreeBase {
      * Note that this function retries internally if CAS fails. Therefore,
      * the number of CAS loop is upperbounded by the chunk size
      */
+    // doodle: 和Figure 4中一致 如果tail < limit 则需要重新分配一个CHUNK
     void *TryAllocate(size_t size) {
       // This acts as a guard to prevent allocating from a chunk which has
       // already underflown to avoid integer (64 bit pointer) underflow
@@ -2219,6 +2229,7 @@ class BwTree : public BwTreeBase {
      * which is invisible to the compiler. Therefore we must call placement
      * operator new to do the job
      */
+    // doodle: 实际是在之前创建好的空间上 调用构造函数 对于InnerNode来说 类型是KeyNodeIDPair
     inline void PushBack(const ElementType &element) {
       // Placement new + copy constructor using end pointer
       new (end) ElementType{element};
@@ -2269,6 +2280,9 @@ class BwTree : public BwTreeBase {
      * new to initialize it, such that the node could be freed using operator
      * delete later on
      */
+    // doodle: 实际的构造函数
+    // InnerNode里面是保存了一堆的KeyNodeIDPair 应该就是注释里提到的sep list (separator list) 用于指向其他节点
+    // LeafNode里面是保存了一堆的KeyValuePair
     inline static ElasticNode *Get(int size,         // Number of elements
                                    NodeType p_type,
                                    int p_depth,
@@ -2292,12 +2306,23 @@ class BwTree : public BwTreeBase {
                    AllocationMeta::CHUNK_SIZE];
       assert(alloc_base != nullptr);
 
+      // doodle:
+      // start和end应该是指向size * sizeof(ElementType)
+      // ElasticNode的内存分布参见paper中的Figure 4
+      // (不过代码和图有点对不上? 现在看起来EletmentType是从低地址到高地址开始分配的)
+      // Low                                                  High
+      // [AllocationMeta, sizeof(ElementType) * size, ElasticNode]
+
       // Initialize the AllocationMeta - tail points to the first byte inside
       // class ElasticNode; limit points to the first byte after class
       // AllocationMeta
-      new (reinterpret_cast<AllocationMeta *>(alloc_base)) \
-        AllocationMeta{alloc_base + AllocationMeta::CHUNK_SIZE,
-                       alloc_base + sizeof(AllocationMeta)};
+      // doodle: AllocationMeta::CHUNK_SIZE = sizeof(DeltaNodeUnion) * 8 + sizeof(AllocationMeta);
+      new (reinterpret_cast<AllocationMeta *>(alloc_base))
+          AllocationMeta{
+              // doodle: tail: higher address end of the chunk we are allocating from
+              alloc_base + AllocationMeta::CHUNK_SIZE,
+              // doodle: limit: lower limit of the memory region we could use
+              alloc_base + sizeof(AllocationMeta)};
 
       // The first CHUNK_SIZE byte is used by class AllocationMeta
       // and chunk data
@@ -2306,6 +2331,7 @@ class BwTree : public BwTreeBase {
           alloc_base + AllocationMeta::CHUNK_SIZE);
 
       // Call placement new to initialize all that could be initialized
+      // doodle: placement new构造 但是没看懂start在哪初始化的
       new (node_p) ElasticNode{p_type,
                                p_depth,
                                p_item_count,
@@ -2332,6 +2358,7 @@ class BwTree : public BwTreeBase {
      * GetAllocationHeader() - Returns the address of class AllocationHeader
      *                         embedded inside the ElasticNode object
      */
+    // doodle: 返回AllocationMeta地址
     static AllocationMeta *GetAllocationHeader(const ElasticNode *node_p) {
       return reinterpret_cast<AllocationMeta *>( \
                reinterpret_cast<uint64_t>(node_p) - \
@@ -2352,6 +2379,7 @@ class BwTree : public BwTreeBase {
      * so (1) it is static, and (2) it takes low key p which is universally
      * available for all node type (stored in NodeMetadata)
      */
+    // doodle: 实际构造所有节点的都是从这里进行内存分配的
     static void *InlineAllocate(const KeyNodeIDPair *low_key_p, size_t size) {
       const ElasticNode *node_p = GetNodeHeader(low_key_p);
       assert(&node_p->low_key == low_key_p);
@@ -2689,6 +2717,7 @@ class BwTree : public BwTreeBase {
                "Setting up execution environment...\n");
 
     InitMappingTable();
+    // doodle: initilize root node and first leaf node
     InitNodeLayout();
 
     bwt_printf("sizeof(NodeMetaData) = %lu is the overhead for each node\n",
@@ -2700,6 +2729,7 @@ class BwTree : public BwTreeBase {
     // in that case GC must be done by calling the interface
     if(start_gc_thread == true) {
       bwt_printf("Starting epoch manager thread...\n");
+      // doodle: mark, epoch manager
       epoch_manager.StartThread();
     }
 
@@ -3037,29 +3067,33 @@ class BwTree : public BwTreeBase {
     // For the first inner node, it needs an empty low key
     // the search procedure will not look at it and only use it
     // if the search key could not be matched to anything after the first key
+    // doodle: KeyNodeIDPair保存对应的start key和node id
     KeyNodeIDPair first_sep{KeyType{}, first_leaf_id};
 
     // Initially there is one element inside the root node
     // so we set item count to be 1
     // The high key is +Inf which is identified by INVALID_NODE_ID
+    // doodle: 构建根节点 有左右孩子KeyNodeIDPair
     InnerNode *root_node_p = \
       reinterpret_cast<InnerNode *>( \
         ElasticNode<KeyNodeIDPair>::\
-          Get(1,
-              NodeType::InnerType,
-              0,
-              1,
-              first_sep,    // Copy this as the first key
-              std::make_pair(KeyType{}, INVALID_NODE_ID)));
+          Get(1,                                                  // node size 主要用来分配内存 ElasticNode要求和node item count相等
+              NodeType::InnerType,                                // node type
+              0,                                                  // node depth
+              1,                                                  // node item count 实际node中的元素个数
+              first_sep,    // Copy this as the first key         // 指向left child node
+              std::make_pair(KeyType{}, INVALID_NODE_ID)));       // 指向right child node
 
     #endif
 
+    // doodle: 把叶子结点添加到根节点
     root_node_p->PushBack(first_sep);
 
     bwt_printf("root id = %lu; first leaf id = %lu\n",
                root_id.load(),
                first_leaf_id);
 
+    // doodle: 加到mapping table
     InstallNewNode(root_id, root_node_p);
 
     // Initially there is no element inside the leaf node so we set element
@@ -3117,6 +3151,8 @@ class BwTree : public BwTreeBase {
    * This function basically compiles to LOCK XADD instruction on x86
    * which is guaranteed to execute atomically
    */
+  // doodle: 有两个GetNextNodeID 一个是这里的BwTree调用的 用于产生下一个NodeID
+  // 而另外一个是BaseNode::GetNextNodeID 用于返回当前Node的下一个NodeID
   inline NodeID GetNextNodeID() {
     // This is a std::pair<bool, NodeID>
     // If the first element is true then the NodeID is a valid one
@@ -3202,6 +3238,8 @@ class BwTree : public BwTreeBase {
     return mapping_table[node_id].load();
   }
 
+  // doodle: SMO (structural modification)
+  // 接口有点奇怪 仔细读下面的NOTE
   /*
    * Traverse() - Traverse down the tree structure, handles abort
    *
@@ -3236,6 +3274,7 @@ class BwTree : public BwTreeBase {
     // For value collection it always returns nullptr
     const KeyValuePair *found_pair_p = nullptr;
 
+    // doodle: 不断调用LoadNodeID进行遍历 查找context中的search_key
 retry_traverse:
     assert(context_p->abort_flag == false);
     assert(context_p->current_level == -1);
@@ -3266,6 +3305,7 @@ retry_traverse:
     bwt_printf("Successfully loading root node ID\n");
 
     while(1) {
+      // doodle: 找到包含相应search_key的InnerNode 返回其NodeID
       NodeID child_node_id = NavigateInnerNode(context_p);
 
       // Navigate could abort since it might go to another NodeID
@@ -3304,7 +3344,9 @@ retry_traverse:
       }
     } //while(1)
 
+    // doodle: 已经到了一个leaf node 然后开始遍历leaf node的delta chain
     if(value_p == nullptr) {
+      // doodle: value_p为空 只定位到相应的LeafNode
       // We are using an iterator just to get a leaf page
       assert(index_pair_p == nullptr);
 
@@ -3314,6 +3356,7 @@ retry_traverse:
       // going down with a specific key
       NavigateSiblingChain(context_p);
     } else {
+      // doodle: value_p不为空 判断相应的search_key是否存在 如果存在返回对应key/value
       // If a value is given then use this value to Traverse down leaf
       // page to find whether the value exists or not
       found_pair_p = NavigateLeafNode(context_p, *value_p, index_pair_p);
@@ -3338,6 +3381,7 @@ retry_traverse:
     return found_pair_p;
 
 abort_traverse:
+    // doodle: context中abort_flag为真 重置回root 从头再来Traverse
     #ifdef BWTREE_DEBUG
 
     assert(context_p->current_level >= 0);
@@ -3537,7 +3581,7 @@ abort_traverse:
    *
    * NOTE: This function will jump to a sibling if the current node is on
    * a half split state. If this happens, then the flag inside snapshot_p
-   * is set to true, and also the corresponding NodeId and BaseNode *
+   * is set to true, and also the corresponding NodeID and BaseNode *
    * will be updated to reflect the newest sibling ID and pointer.
    * After returning of this function please remember to check the flag
    * and update path history. (Such jump may happen multiple times, so
@@ -3546,6 +3590,7 @@ abort_traverse:
   NodeID NavigateInnerNode(Context *context_p) {
     // This will go to the right sibling until we have seen
     // a node whose range match the search key
+    // doodle: search_key >= 当前节点的GetHighKey() 切换到Sibling节点
     NavigateSiblingChain(context_p);
 
     // If navigating sibling chain aborts then abort here
@@ -3585,16 +3630,19 @@ abort_traverse:
     const KeyNodeIDPair *end_p = \
       InnerNode::GetNodeHeader(&node_p->GetLowKeyPair())->End();
 
+    // doodle: traverse down along the InnerNode
     while(1) {
       NodeType type = node_p->GetType();
 
       switch(type) {
         case NodeType::InnerType: {
+          // doodle: delta chain中的正常节点 (这个函数都是InnerNode 不会落到LeafNode中)
           const InnerNode *inner_node_p = \
             static_cast<const InnerNode *>(node_p);
 
           // We always use the ubound recorded inside the top of the
           // delta chain
+          // doodle: 获取separator list 然后二分查找
           NodeID target_id = \
             LocateSeparatorByKey(search_key,
                                  inner_node_p,
@@ -3607,6 +3655,8 @@ abort_traverse:
           return target_id;
         } // case InnerType
         case NodeType::InnerInsertType: {
+          // doodle: 应该是delta chain里面的insert
+          // doodle: 对start_p和end_p的修改就是paper中提到的Node Search Shortcuts
           const InnerInsertNode *insert_node_p = \
             static_cast<const InnerInsertNode *>(node_p);
 
@@ -3623,6 +3673,7 @@ abort_traverse:
               bwt_printf("Find target ID = %lu in insert delta\n",
                          insert_item.second);
 
+              // doodle: found insert, insert_item.first == search_key == next_item.first
               return insert_item.second;
             }
 
@@ -3634,6 +3685,8 @@ abort_traverse:
           break;
         } // InnerInsertType
         case NodeType::InnerDeleteType: {
+          // doodle: 应该是delta chain里面的delete
+          // doodle: 对start_p和end_p的修改就是paper中提到的Node Search Shortcuts
           const InnerDeleteNode *delete_node_p = \
             static_cast<const InnerDeleteNode *>(node_p);
 
@@ -3660,6 +3713,7 @@ abort_traverse:
               bwt_printf("Find target ID = %lu in delete delta\n",
                          prev_item.second);
 
+              // doodle: found delete, prev_item.first <= search_key < next_item.first
               return prev_item.second;
             }
           }
@@ -3874,7 +3928,7 @@ abort_traverse:
    *
    * NOTE: This function could take an optional depth argument indicating the
    * depth of the newly constructed InnerNode. This is majorly used by other
-   * proceures where parent node is consolidated and scanned in order to find
+   * procedures where parent node is consolidated and scanned in order to find
    * a certain key.
    */
   InnerNode *CollectAllSepsOnInner(NodeSnapshot *snapshot_p,
@@ -3944,6 +3998,7 @@ abort_traverse:
    * Please refer to the function on leaf node for details. These two have
    * almost the same logical flow
    */
+  // doodle: 和CollectAllValuesOnLeafRecursive里面的逻辑差不多 区别就是InnerNode的合并方式
   template<typename T> // To make the f**king compiler
                        // to deduce SortedSmallSet template type
   void
@@ -4026,12 +4081,16 @@ abort_traverse:
 
           //printf("%ld\n", sss.GetSize());
 
+          // doodle: 合并两组元素:
+          // 1. [sss.Begin(), sss_end_it) 来自sss
+          // 2. [copy_start_it, copy_end_it) 来自InnerNode
           while(1) {
             bool sss_end_flag = (sss.GetBegin() == sss_end_it);
             bool array_end_flag = (copy_start_it == copy_end_it);
 
             //printf("sss_end_flag = %d; array_end_flag = %d\n", sss_end_flag, array_end_flag);
 
+            // doodle: 任何一组元素已经merge完了的情况
             if(sss_end_flag == true && array_end_flag == true) {
               // Both are drained
               break;
@@ -4066,17 +4125,20 @@ abort_traverse:
               break;
             }
 
+            // doodle: 两组元素都没有merge完
             // Next is the normal case: Both are not drained
             // we do a comparison of their leading elements
 
             if(key_cmp_obj(copy_start_it->first,
                            sss.GetFront()->item.first) == true) {
+              // doodle: copy_start_it指向元素 < sss.GetFront()指向元素
               // If array element is less than data node list element
               new_inner_node_p->PushBack(*copy_start_it);
 
               copy_start_it++;
             } else if(key_cmp_obj(sss.GetFront()->item.first,
                                   copy_start_it->first) == true) {
+              // doodle: sss.GetFront()指向元素 < copy_start_it指向元素
               NodeType data_node_type = (sss.GetFront())->GetType();
 
               // Delta Insert with array not having that element
@@ -4092,6 +4154,7 @@ abort_traverse:
               }
             } else {
               // In this branch the values are equal
+              // doodle: sss.GetFront()指向元素 == copy_start_it指向元素, 则sss中的元素会有效
 
               NodeType data_node_type = (sss.GetFront())->GetType();
 
@@ -4258,6 +4321,8 @@ abort_traverse:
     // length * pointer size. On the contrary, if the size of
     // ValueType is huge, and we store ValueType, then we might cause
     // a stack overflow
+    // doodle: present_set_data_p和deleted_set_data_p是为了Non-unique Key Support
+    // 参见paper中的Figure 3
     const ValueType *present_set_data_p[set_max_size];
     const ValueType *deleted_set_data_p[set_max_size];
 
@@ -4271,6 +4336,7 @@ abort_traverse:
                   value_eq_obj,
                   value_hash_obj};
 
+    // doodle: 对start_index和end_index的修改就是paper中提到的Node Search Shortcuts
     int start_index = 0;
     int end_index = -1;
 
@@ -4435,6 +4501,9 @@ abort_traverse:
    * There are possibility that the switch aborts, and in this case this
    * function returns with value false.
    */
+  // doodle: 检查search_key和search_value是否存在在LeafNode中 (即便key相同value不同也返回false)
+  // index_pair_p->first指向对应Node中对应key/value的offset
+  // index_pair_p->second表示是否找到
   const KeyValuePair *NavigateLeafNode(Context *context_p,
                                        const ValueType &search_value,
                                        std::pair<int, bool> *index_pair_p) {
@@ -4467,6 +4536,7 @@ abort_traverse:
 
       switch(type) {
         case NodeType::LeafType: {
+          // doodle: 二分定位 然后顺序查找
           const LeafNode *leaf_node_p = \
             static_cast<const LeafNode *>(node_p);
 
@@ -4819,6 +4889,8 @@ abort_traverse:
     // Prepare new node
     /////////////////////////////////////////////////////////////////
 
+    // doodle: 一开始叶子结点都是插入了一堆的delta node 此时要创建一个LeafNode用来合并
+    // 但是likely有点诡异?
     if(likely(leaf_node_p == nullptr)) {
       leaf_node_p = \
         reinterpret_cast<LeafNode *>(ElasticNode<KeyValuePair>::\
@@ -4856,8 +4928,12 @@ abort_traverse:
     // Prepare Small Sorted Set
     /////////////////////////////////////////////////////////////////
 
+    // doodle: LeafDataNode是LeafInsertNode和LeafDeleteNode的基类
     const LeafDataNode *sss_data_p[delta_change_num];
 
+    // doodle: 先判断key1 < key2是否成立 如果key1 == key2 再看index的关系
+    // GetIndexPair返回当插入的key/value已经存在时 对应在LeafNode中的offset
+    // 存在时保存<对应offset, true> 不存在时保存<最大offset, false> 参见NavigateLeafNode
     auto f1 = [this](const LeafDataNode *ldn1, const LeafDataNode *ldn2) {
       // Compare using key first; if keys are equal then compare using
       // index (since we must pop those nodes in a key-order given the index)
@@ -4923,6 +4999,7 @@ abort_traverse:
    * DO NOT CALL THIS DIRECTLY - Always use the wrapper (the one without
    * "Recursive" suffix)
    */
+  // doodle: new_leaf_node_p是要生成的consolidate LeafNode
   template <typename T>  // To let the compiler deduce type of sss
   void
   CollectAllValuesOnLeafRecursive(const BaseNode *node_p,
@@ -4946,6 +5023,7 @@ abort_traverse:
           // We compute end iterator based on the high key
           const KeyValuePair *copy_end_it;
 
+          // doodle: 先确定LeafNode中需要copy的数据范围 当high_key_pair不为空时 实际是[Begin, high_key)
           // If the high key is +Inf then all items could be copied
           if((high_key_pair.second == INVALID_NODE_ID)) {
             copy_end_it = leaf_node_p->End();
@@ -4971,6 +5049,7 @@ abort_traverse:
           ///////////////////////////////////////////////////////////
 
           // Find the end of copying
+          // doodle: sss_end_it置于first element >= high key的位置
           auto sss_end_it = sss.GetEnd() - 1;
 
           // If the next key is +Inf then sss_end_it is the real end of the
@@ -4997,6 +5076,10 @@ abort_traverse:
           ///////////////////////////////////////////////////////////
 
           // While the sss has not reached the end for this node
+          // doodle: merge一下两部分元素
+          // 1. sss中的元素(delta chain中的元素) sss是有序保存
+          //    此时[sss.GetBegin(), sss_end_it)的数据范围是[Begin(), high key)
+          // 2. 和[copy_start_index, copy_end_index)中指向的元素
           while(sss.GetBegin() != sss_end_it) {
             int current_index = sss.GetFront()->GetIndexPair().first;
 
@@ -5007,6 +5090,7 @@ abort_traverse:
             assert(copy_start_index <= current_index);
             assert(current_index <= copy_end_index);
 
+            // doodle: 先copy [copy_start_index, current_index) 然后下面去处理delta chain中有overwrite的情况
             // First copy all items before the current index
             new_leaf_node_p->PushBack(
               leaf_node_p->Begin() + copy_start_index,
@@ -5015,6 +5099,12 @@ abort_traverse:
             // Update copy start index for next copy
             copy_start_index = current_index;
 
+            // doodle:
+            // 某个元素被sss中overwrite过 (也就是有新插入的delta chain中的值覆盖了LeafNode中的值)
+            // 由于sss有序 所以会满足sss.GetFront()->GetIndexPair().first == current_index
+            // 然后对于LeafInsertType需要将sss中的元素插入到最终new_leaf_node_p中
+            // 而LeafDeleteType则直接忽略
+            // 最后如果有overwrite发生 则copy_start_index++(因为这个key已经在delta chain中处理过了)
             // Drain delta records on the same index
             while(sss.GetFront()->GetIndexPair().first == current_index) {
               // Update current status of the item on leaf base node
@@ -5345,6 +5435,7 @@ abort_traverse:
     const BaseNode *node_p = GetNode(node_id);
 
     // We operate on the latest snapshot instead of creating a new one
+    // doodle: 只获取current_snapshot 并在下面进行修改
     NodeSnapshot *snapshot_p = GetLatestNodeSnapshot(context_p);
 
     // Assume we always use this function to traverse on the same
@@ -5385,14 +5476,17 @@ abort_traverse:
     bwt_printf("Loading NodeID = %lu\n", node_id);
 
     // This pushes a new snapshot into stack
+    // doodle: 修改parent_snapshot和current_snapshot
     TakeNodeSnapshot(node_id, context_p);
 
     // If there are SMO (split; merge) that require much computation to
-    // deal with (e.g. go to its parent and comsolidate parent first) then
-    // we should aggressively comsolidate the SMO away to avoid further
+    // deal with (e.g. go to its parent and consolidate parent first) then
+    // we should aggressively consolidate the SMO away to avoid further
     // access
+    // doodle: 特殊处理split/merge/abort类型Node 正常节点直接返回
     FinishPartialSMO(context_p);
 
+    // doodle: 实现的paper附录里写了一个concurrent merge + split的case需要abort 还没仔细看
     if(context_p->abort_flag == true) {
       return;
     }
@@ -5444,7 +5538,7 @@ abort_traverse:
    * FinishPartialSMOReadOptimized() - Read optimized version of
    *                                   FinishPartialSMO()
    *
-   * This function only delas with remove delta and abort node
+   * This function only deals with remove delta and abort node
    */
   inline void FinishPartialSMOReadOptimized(Context *context_p) {
     // Note: If the top of the path list changes then this pointer
@@ -5610,6 +5704,7 @@ retry_traverse:
     // This is the serialization point for reading/writing root node
     NodeID child_node_id = root_id.load();
 
+    // doodle: 和Traverse的区别在于不在乎parent_snapshot里面是啥 只初始化current_snapshot
     LoadNodeIDReadOptimized(child_node_id, context_p);
 
     if(context_p->abort_flag == true) {
@@ -5620,6 +5715,7 @@ retry_traverse:
 
     bwt_printf("Successfully loading root node ID (RO)\n");
 
+    // doodle: traverse down along the InnerNode
     while(1) {
       child_node_id = NavigateInnerNode(context_p);
 
@@ -5654,6 +5750,7 @@ retry_traverse:
       // This is the node we have just loaded
       NodeSnapshot *snapshot_p = GetLatestNodeSnapshot(context_p);
 
+      // doodle: 在LeafNode中把search_key的所有value都放入到value_list_p中
       if(snapshot_p->IsLeaf() == true) {
         bwt_printf("The next node is a leaf (RO)\n");
 
@@ -5875,6 +5972,8 @@ abort_traverse:
    * we need to read NodeID, always use the one stored in the NodeSnapshot
    * vector instead of using a previously passed one
    */
+  // doodle: wait until SMO finished
+  // doodle: mark 需要看下paper
   void FinishPartialSMO(Context *context_p) {
     // Note: If the top of the path list changes then this pointer
     // must also be updated
@@ -6294,6 +6393,7 @@ before_switch:
 
     LeafNode *leaf_node_p = CollectAllValuesOnLeaf(snapshot_p);
 
+    // doodle: LeafNode替换为consolidate之后的
     bool ret = InstallNodeToReplace(snapshot_p->node_id,
                                     leaf_node_p,
                                     snapshot_p->node_p);
@@ -6456,10 +6556,13 @@ before_switch:
 
       // Perform corresponding action based on node size
       if(node_size >= LEAF_NODE_SIZE_UPPER_THRESHOLD) {
+        // doodle: trigger split
         bwt_printf("Node size >= leaf upper threshold. Split\n");
 
         // Note: This function takes this as argument since it will
         // do key comparison
+        // doodle: 叶子结点分裂 GetSplitSibling返回从leaf_node_p分裂出来的右孩子(左孩子是下面的split_node_p)
+        // 需要传this 也就是BwTree只是为了用KeyComparator
         const LeafNode *new_leaf_node_p = leaf_node_p->GetSplitSibling(this);
 
         // If the new leaf node pointer is nullptr then it means the
@@ -6492,6 +6595,8 @@ before_switch:
 
         // Note that although split node only stores the new node ID
         // we still need its pointer to compute item_count
+        // doodle: 生成一个LeafSplitNode(一种DeltaNode) 原来的node_p作为split_node_p的child
+        // range为[node_p->GetLowKeyPair(), {split_key, new_node_id})
         const LeafSplitNode *split_node_p = \
           LeafInlineAllocateOfType(LeafSplitNode,
                                    node_p,
@@ -6504,6 +6609,7 @@ before_switch:
         InstallNewNode(new_node_id, new_leaf_node_p);
 
         // Then CAS split delta into current node's NodeID
+        // doodle: 将mapping table中的老节点node_p替换为split_node_p
         bool ret = InstallNodeToReplace(node_id, split_node_p, node_p);
 
         if(ret == true) {
@@ -6558,6 +6664,10 @@ before_switch:
         const BaseNode *abort_child_node_p;
         NodeID parent_node_id;
 
+        // doodle: abort node作用是啥 有待翻附录
+        // 初始状态parent -> leaf
+        // 把parent node换成InnerAbortNode 把parent阻塞
+        // 如果cas成功 *abort_node_p是新生成的InnerAbortNode *abort_child_node_p是原来的parent node
         bool abort_node_ret = \
           PostAbortOnParent(context_p,
                             &parent_node_id,
@@ -6567,6 +6677,7 @@ before_switch:
         // If we could not block the parent then the parent has changed
         // (splitted, etc.)
         if(abort_node_ret == true) {
+          // 当前状态InnerAbortNode -> leaf
           bwt_printf("Blocked parent node (current node is leaf)\n");
         } else {
           bwt_printf("Unable to block parent node "
@@ -6578,16 +6689,22 @@ before_switch:
           return;
         }
 
+        // doodle: 生成一个LeafRemoveNode 并替换当前节点 表示等待merge?
         const LeafRemoveNode *remove_node_p = \
           new LeafRemoveNode{node_id,
                              node_p};
 
         bool ret = InstallNodeToReplace(node_id, remove_node_p, node_p);
         if(ret == true) {
+          // doodle: PostAbortOnParent和InstallNodeToReplace都成功 此时状态是:
+          // InnerAbortNode -> LeafRemoveNode
           bwt_printf("LeafRemoveNode CAS succeeds. ABORT.\n");
 
           context_p->abort_flag = true;
 
+          // doodle: 如果前面两个cas都成功 将InnerAbortNode再换成之前的parent node
+          // parent -> LeafRemoveNode
+          // 其实就是把leaf换了个类型
           RemoveAbortOnParent(parent_node_id,
                               abort_node_p,
                               abort_child_node_p);
@@ -6613,8 +6730,10 @@ before_switch:
       size_t node_size = inner_node_p->GetSize();
 
       if(node_size >= INNER_NODE_SIZE_UPPER_THRESHOLD) {
+        // doodle: InnerNode split
         bwt_printf("Node size >= inner upper threshold. Split\n");
 
+        // doodle: 生成sibling 持有[split key, end)
         const InnerNode *new_inner_node_p = inner_node_p->GetSplitSibling();
 
         // Since this is a split sibling, the low key must be a valid key
@@ -6628,6 +6747,7 @@ before_switch:
 
         // This points to the left most node on the right split sibling
         // If this node is being removed then we abort
+        // doodle: 因为是InnerNode 所以生成的sibling中一定指向其他Node
         NodeID split_key_child_node_id = first_item.second;
 
         // This must be the split key
@@ -6653,6 +6773,9 @@ before_switch:
 
         NodeID new_node_id = GetNextNodeID();
 
+        // doodle: 把原始的node_p替换为split_node_p
+        // doodle: 生成一个InnerSplitNode(一种DeltaNode) 原来的node_p作为split_node_p的child
+        // range为[node_p->GetLowKeyPair(), {split_key, new_node_id})
         const InnerSplitNode *split_node_p = \
           InnerInlineAllocateOfType(InnerSplitNode,
                                     node_p,
@@ -6717,6 +6840,7 @@ before_switch:
 
         bwt_printf("Node size <= inner lower threshold. Remove\n");
 
+        // doodle: InnerNode和LeafNode处理流程一样 参考上面 这里生成的是InnerRemoveNode 而leaf生成的是LeafRemoveNode
         // Then we abort its parent node
         // These two are used to hold abort node and its previous child
         const BaseNode *abort_node_p;
@@ -7357,6 +7481,9 @@ before_switch:
     insert_op_count.fetch_add(1);
     #endif
 
+    // doodle:
+    // all memory deallocated on and after current epoch will not be
+    // freed before current thread leaves
     EpochNode *epoch_node_p = epoch_manager.JoinEpoch();
 
     while(1) {
@@ -7367,6 +7494,9 @@ before_switch:
       // Also if the key previously exists in the delta chain
       // then return the position of the node using next_key_p
       // if there is none then return nullptr
+      // doodle: 对于Insert 确定插入的key/value是否已经存在
+      // index_pair用来表示 当插入的key/value已经存在时 对应在LeafNode中的offset
+      // 存在时保存<对应offset, true> 不存在时保存<最大offset, false> 参见NavigateLeafNode
       const KeyValuePair *item_p = Traverse(&context, &value, &index_pair);
 
       // If the key-value pair already exists then return false
@@ -7382,6 +7512,7 @@ before_switch:
       const BaseNode *node_p = snapshot_p->node_p;
       NodeID node_id = snapshot_p->node_id;
 
+      // doodle: cas增加一个LeafInsertNode
       const LeafInsertNode *insert_node_p = \
         LeafInlineAllocateOfType(LeafInsertNode,
                                  node_p,
@@ -7553,6 +7684,7 @@ before_switch:
    *
    * This functions shares a same structure with the Insert() one
    */
+  // doodle: 和Insert几乎一样
   bool Delete(const KeyType &key, const ValueType &value) {
     bwt_printf("Delete called\n");
 
@@ -9178,6 +9310,7 @@ try_join_again:
       // after new IteratorContext is created
       KeyType start_key = *start_key_p;
 
+      // doodle: 定位到start_key对应的LeafNode
       while(1) {
         // First join the epoch to prevent physical nodes being deallocated
         // too early

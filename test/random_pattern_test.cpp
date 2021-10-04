@@ -369,6 +369,7 @@ void RandomInsertTest(uint64_t thread_id, TreeType *t) {
  * key space is 1M
  */
 void RandomInsertVerify(TreeType *t) {
+  // doodle: 怎么保证1M个key都能生成? 不是随机的吗
   for(int i = 0;i < 1024 * 1024;i++) {
     auto s = t->GetValue(i);
 
